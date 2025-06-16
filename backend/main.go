@@ -1,6 +1,7 @@
 package main
 
 import (
+
 	"crypto/subtle"
 	"encoding/json"
 	"log"
@@ -50,9 +51,16 @@ func helloHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response{Message: "Hello from Go backend"})
 }
 
+=======
+	"encoding/json"
+	"log"
+	"net/http"
+)
+
 type response struct {
 	Message string `json:"message"`
 }
+
 
 func createPostFromJSON(w http.ResponseWriter, r *http.Request) {
 	var p Post
@@ -136,7 +144,7 @@ func main() {
 	http.HandleFunc("/api/posts", authMiddleware(createPostFromJSON))
 	http.HandleFunc("/api/posts/ipynb", authMiddleware(createPostFromNotebook))
 	http.HandleFunc("/api/posts/list", listPosts)
-
+  
 	log.Println("Starting server on :8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatal(err)

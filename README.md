@@ -32,6 +32,16 @@ go run .
 
 Run in development:
 
+=======
+- `backend/` – a small Go server exposing a `/api/hello` endpoint.
+
+Run the backend:
+```bash
+go run ./backend
+```
+
+Run the frontend in development:
+
 ```bash
 cd frontend
 npm run dev

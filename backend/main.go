@@ -1,0 +1,249 @@
+package main
+
+import (
+	"crypto/subtle"
+	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+
+	blackfriday "github.com/russross/blackfriday/v2"
+)
+
+// simple in-memory store
+var (
+	posts  = make(map[int]Post)
+	nextID = 1
+	mu     sync.Mutex
+)
+
+type Post struct {
+	ID        int    `json:"id"`
+	Title     string `json:"title"`
+	Content   string `json:"content,omitempty"`
+	Type      string `json:"type"` // text, video, audio
+	Premium   bool   `json:"premium"`
+	Media     []byte `json:"-"`
+	MediaType string `json:"media_type,omitempty"`
+}
+
+func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	expected := os.Getenv("BLOG_TOKEN")
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("Authorization")
+		if len(expected) == 0 || !checkToken(token, expected) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func paywallMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	expected := os.Getenv("PAYWALL_TOKEN")
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("X-Paywall-Token")
+		if len(expected) == 0 || !checkToken(token, expected) {
+			http.Error(w, "payment required", http.StatusPaymentRequired)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func checkToken(header, token string) bool {
+	const prefix = "Bearer "
+	if len(header) <= len(prefix) || header[:len(prefix)] != prefix {
+		return false
+	}
+	provided := header[len(prefix):]
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 1
+}
+
+func helloHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response{Message: "Hello from Go backend"})
+}
+
+type response struct {
+	Message string `json:"message"`
+}
+
+func createPostFromJSON(w http.ResponseWriter, r *http.Request) {
+	var p Post
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	p.Type = "text"
+	mu.Lock()
+	p.ID = nextID
+	nextID++
+	posts[p.ID] = p
+	mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(p)
+}
+
+func createPostFromNotebook(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		Title    string `json:"title"`
+		Notebook string `json:"notebook"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	content, err := parseNotebook([]byte(payload.Notebook))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	mu.Lock()
+	p := Post{ID: nextID, Title: payload.Title, Content: content, Type: "text"}
+	nextID++
+	posts[p.ID] = p
+	mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(p)
+}
+
+func createMediaPost(kind string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		title := r.FormValue("title")
+		premium := r.FormValue("premium") == "true"
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+		data, err := io.ReadAll(file)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		mu.Lock()
+		p := Post{
+			ID:        nextID,
+			Title:     title,
+			Type:      kind,
+			Premium:   premium,
+			Media:     data,
+			MediaType: header.Header.Get("Content-Type"),
+		}
+		nextID++
+		posts[p.ID] = p
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(p)
+	}
+}
+
+func listPosts(w http.ResponseWriter, r *http.Request) {
+	wantPremium := r.URL.Query().Get("premium") == "true"
+	if wantPremium {
+		// paywall check
+		expected := os.Getenv("PAYWALL_TOKEN")
+		token := r.Header.Get("X-Paywall-Token")
+		if len(expected) == 0 || !checkToken(token, expected) {
+			http.Error(w, "payment required", http.StatusPaymentRequired)
+			return
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	list := make([]Post, 0, len(posts))
+	for _, p := range posts {
+		if wantPremium && !p.Premium {
+			continue
+		}
+		if !wantPremium && p.Premium {
+			continue
+		}
+		list = append(list, p)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
+func serveMedia(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 {
+		http.NotFound(w, r)
+		return
+	}
+	id, err := strconv.Atoi(parts[3])
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	mu.Lock()
+	p, ok := posts[id]
+	mu.Unlock()
+	if !ok || len(p.Media) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	if p.Premium {
+		expected := os.Getenv("PAYWALL_TOKEN")
+		token := r.Header.Get("X-Paywall-Token")
+		if len(expected) == 0 || !checkToken(token, expected) {
+			http.Error(w, "payment required", http.StatusPaymentRequired)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", p.MediaType)
+	w.Write(p.Media)
+}
+
+func parseNotebook(data []byte) (string, error) {
+	var nb struct {
+		Cells []struct {
+			CellType string   `json:"cell_type"`
+			Source   []string `json:"source"`
+		} `json:"cells"`
+	}
+	if err := json.Unmarshal(data, &nb); err != nil {
+		return "", err
+	}
+	var out []byte
+	for _, c := range nb.Cells {
+		text := ""
+		for _, l := range c.Source {
+			text += l
+		}
+		switch c.CellType {
+		case "markdown":
+			out = append(out, blackfriday.Run([]byte(text))...)
+		case "code":
+			out = append(out, []byte("<pre><code>")...)
+			out = append(out, []byte(text)...)
+			out = append(out, []byte("</code></pre>")...)
+		}
+	}
+	return string(out), nil
+}
+
+func main() {
+	http.HandleFunc("/api/hello", helloHandler)
+	http.HandleFunc("/api/posts", authMiddleware(createPostFromJSON))
+	http.HandleFunc("/api/posts/ipynb", authMiddleware(createPostFromNotebook))
+	http.HandleFunc("/api/posts/video", authMiddleware(createMediaPost("video")))
+	http.HandleFunc("/api/posts/audio", authMiddleware(createMediaPost("audio")))
+	http.HandleFunc("/api/posts/list", listPosts)
+	http.HandleFunc("/api/posts/media/", serveMedia)
+
+	log.Println("Starting server on :8080")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		log.Fatal(err)
+	}
+}

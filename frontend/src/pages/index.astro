@@ -1,0 +1,61 @@
+---
+---
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>WikiGo Blog</title>
+    <style>
+      body { font-family: sans-serif; margin:0; }
+      header { background:#333; color:#fff; padding:1rem; display:flex; gap:1rem; }
+      header a { color:#fff; text-decoration:none; }
+      section { padding:1rem; }
+      video, audio { max-width: 100%; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1 style="margin-right:auto">WikiGo</h1>
+      <a href="#free">Free</a>
+      <a href="#premium" id="premium-link">Premium</a>
+      <a href="#about">About</a>
+    </header>
+    <section id="free">
+      <h2>Free Posts</h2>
+      <div id="free-list"></div>
+    </section>
+    <section id="premium">
+      <h2>Premium Posts</h2>
+      <div id="premium-list"></div>
+    </section>
+    <section id="about">
+      <h2>About Me</h2>
+      <p>This is a minimal blog built with Astro and Go.</p>
+    </section>
+    <script type="module">
+      function renderPost(p) {
+        if (p.type === 'video') {
+          return `<h3>${p.title}</h3><video controls src="/api/posts/media/${p.id}"></video>`;
+        } else if (p.type === 'audio') {
+          return `<h3>${p.title}</h3><audio controls src="/api/posts/media/${p.id}"></audio>`;
+        }
+        return `<h3>${p.title}</h3><div>${p.content}</div>`;
+      }
+      async function loadFree() {
+        const posts = await fetch('/api/posts/list?premium=false').then(r => r.json());
+        const c = document.getElementById('free-list');
+        posts.forEach(p => { const el = document.createElement('div'); el.innerHTML = renderPost(p); c.appendChild(el); });
+      }
+      async function loadPremium() {
+        let token = localStorage.getItem('payToken');
+        if (!token) { token = prompt('Enter premium token'); if (!token) return; localStorage.setItem('payToken', token); }
+        const res = await fetch('/api/posts/list?premium=true', { headers: {'X-Paywall-Token': token} });
+        if (!res.ok) { alert('Invalid token'); return; }
+        const posts = await res.json();
+        const c = document.getElementById('premium-list'); c.innerHTML='';
+        posts.forEach(p => { const el = document.createElement('div'); el.innerHTML = renderPost(p); c.appendChild(el); });
+      }
+      document.getElementById('premium-link').addEventListener('click', loadPremium);
+      loadFree();
+    </script>
+  </body>
+</html>
